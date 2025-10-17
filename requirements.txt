@@ -1,1 +1,5 @@
-Flask Flask-SocketIO eventlet gunicorn yt-dlp
+Flask
+Flask-SocketIO
+eventlet
+gunicorn
+yt-dlp
