@@ -45,22 +45,22 @@ structured_logger = StructuredLogger(logger)
 app = Flask(__name__)
 
 # =============================================================================
-# CONFIGURACIÓN (Solo IMAP)
+# CONFIGURACIÓN (Solo IMAP) - VALORES POR DEFECTO AÑADIDOS
 # =============================================================================
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
-IMAP_USERNAME = os.getenv("IMAP_USERNAME")
-IMAP_PASSWORD = os.getenv("IMAP_PASSWORD")
-EMAIL_FOLDER = "INBOX"
+# Usando los valores de tu captura de pantalla como valores por defecto:
+IMAP_USER = os.getenv("IMAP_USER", "youchatbotpy@gmail.com")
+IMAP_PASSWORD = os.getenv("IMAP_PASSWORD", "wopahppfgakptilr")
 
+EMAIL_FOLDER = "INBOX"
 CHECK_INTERVAL = 5  # Segundos entre chequeos
 
 # Comprobación de credenciales al inicio del script
-if not IMAP_USERNAME or not IMAP_PASSWORD:
-    structured_logger.error("Error: Las credenciales IMAP no están configuradas. Por favor, define las variables de entorno IMAP_USERNAME y IMAP_PASSWORD.")
-    # Forzar la salida del programa si las credenciales son críticas y faltan
-    # Esto evita que el bot se ejecute sin poder hacer su trabajo principal.
-    # sys.exit(1) # Descomentar esto si quieres que falle la app al inicio sin credenciales.
-    pass # Permite que la aplicación web se inicie, pero el bot IMAP fallará.
+if not IMAP_USER or not IMAP_PASSWORD:
+    # Este bloque solo se ejecutaría si las variables de entorno se definen como vacías,
+    # ya que ahora tenemos valores por defecto.
+    structured_logger.error("Error: Las credenciales IMAP no están configuradas (IMAP_USER/IMAP_PASSWORD).")
+    pass 
 
 
 # =============================================================================
@@ -78,9 +78,9 @@ class YouChatBot:
 
     def connect_imap(self) -> bool:
         """Intenta conectar y logearse al servidor IMAP."""
-        if not IMAP_USERNAME or not IMAP_PASSWORD:
-            # Este error ya fue registrado arriba, pero lo repetimos por si acaso
-            structured_logger.error("Credenciales IMAP no configuradas (IMAP_USERNAME/IMAP_PASSWORD). No se puede conectar.")
+        # Se usa IMAP_USER e IMAP_PASSWORD, que ahora tienen valores por defecto
+        if not IMAP_USER or not IMAP_PASSWORD:
+            structured_logger.error("Credenciales IMAP no configuradas (IMAP_USER/IMAP_PASSWORD). No se puede conectar.")
             return False
 
         if self.imap_connection:
@@ -97,7 +97,8 @@ class YouChatBot:
         
         try:
             self.imap_connection = imaplib.IMAP4_SSL(IMAP_SERVER)
-            self.imap_connection.login(IMAP_USERNAME, IMAP_PASSWORD)
+            # USANDO IMAP_USER y IMAP_PASSWORD
+            self.imap_connection.login(IMAP_USER, IMAP_PASSWORD)
             self.imap_connection.select(EMAIL_FOLDER)
             structured_logger.info("Conexión IMAP exitosa y carpeta seleccionada", {"server": IMAP_SERVER, "folder": EMAIL_FOLDER})
             return True
@@ -114,11 +115,9 @@ class YouChatBot:
         """Cierra la conexión IMAP."""
         if self.imap_connection:
             try:
-                # Intenta hacer logout de forma segura
                 self.imap_connection.logout()
                 structured_logger.info("Conexión IMAP cerrada.")
             except Exception as e:
-                # Captura errores al intentar cerrar una conexión ya rota
                 structured_logger.error("Error al intentar cerrar conexión IMAP", {"error": str(e)})
             self.imap_connection = None
 
@@ -126,7 +125,6 @@ class YouChatBot:
         """Busca y descarga correos no procesados."""
         new_emails_data: List[Dict[str, Any]] = []
         
-        # Conexión fallida o credenciales ausentes
         if not self.connect_imap() or not self.imap_connection:
             return new_emails_data
 
@@ -134,7 +132,6 @@ class YouChatBot:
             # Buscar correos no leídos
             status, email_ids = self.imap_connection.search(None, 'UNSEEN')
             if status != 'OK' or not email_ids[0]:
-                # structured_logger.info("No se encontraron correos nuevos.") # Silenciamiento para evitar spam de logs
                 return new_emails_data
 
             id_list = email_ids[0].split()
@@ -146,14 +143,9 @@ class YouChatBot:
                     continue
 
                 msg = email.message_from_bytes(msg_data[0][1])
-                # Usar Message-ID como ID único, o generar uno si falta
                 message_id = msg.get('Message-ID', f"No-ID-{uuid.uuid4()}")
 
-                # Comprobar si ya fue procesado (esto evita repeticiones si la marca \Seen falla)
-                if any(email['id'] == message_id for email in self.processed_emails):
-                    continue
-                
-                # Marcar como leído para que no aparezca en la siguiente búsqueda UNSEEN
+                # Marcar como leído
                 try:
                     self.imap_connection.store(email_id, '+FLAGS', '\\Seen')
                 except Exception as e:
@@ -192,7 +184,6 @@ class YouChatBot:
 
             if ctype == 'text/plain' and 'attachment' not in cdispo:
                 try:
-                    # Intenta decodificar usando el charset del correo o UTF-8 por defecto
                     return part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8', errors='ignore').strip()
                 except:
                     return "Error al decodificar el cuerpo del correo."
@@ -201,7 +192,7 @@ class YouChatBot:
 
     def run_bot(self):
         """Bucle principal de ejecución del bot."""
-        if not IMAP_USERNAME or not IMAP_PASSWORD:
+        if not IMAP_USER or not IMAP_PASSWORD:
             structured_logger.error("Bot IMAP detenido: Credenciales no disponibles.")
             self.is_running = False
             return
@@ -233,7 +224,7 @@ def get_status():
         "check_interval_seconds": CHECK_INTERVAL,
         "unique_emails_tracked": len(youchat_bot.processed_emails),
         "imap_connected": youchat_bot.imap_connection is not None,
-        "imap_username_set": IMAP_USERNAME is not None,
+        "imap_user_set": IMAP_USER is not None,
     })
 
 @app.route('/inbox', methods=['GET'])
@@ -256,10 +247,11 @@ def inicializar_bot():
     structured_logger.info("Bot iniciado y listo.")
 
 # Iniciar el bot cuando se carga la aplicación
-if IMAP_USERNAME and IMAP_PASSWORD:
+if IMAP_USER and IMAP_PASSWORD:
     inicializar_bot()
 else:
-    structured_logger.error("IMAP Bot no se pudo iniciar: Faltan credenciales críticas.")
+    # Esto es altamente improbable ya que se han establecido valores por defecto
+    structured_logger.error("IMAP Bot no se pudo iniciar: Faltan credenciales críticas (incluso con valores por defecto).")
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
