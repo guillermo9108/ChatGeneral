@@ -2,24 +2,21 @@ import os
 import time
 import imaplib
 import email
-import requests
-import smtplib
-from flask import Flask, jsonify, render_template, send_from_directory # Se importan render_template y send_from_directory
+from flask import Flask, jsonify
 import threading
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 import traceback
-import signal
 import sys
 import json
-from email.utils import parseaddr, formatdate, decode_header
+from email.utils import parseaddr, formatdate
 import uuid
-import re # Se importa para limpiar strings
+from typing import Optional, Dict, Any, List
 
 # Configuración de logging mejorada con rotación
 logging.basicConfig(
-    level=logging.DEBUG,  # DEBUG para desarrollo, INFO para producción
+    level=logging.INFO,  # INFO para un entorno de producción, DEBUG para desarrollo
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
@@ -30,15 +27,15 @@ logger = logging.getLogger(__name__)
 
 # Clase para logging estructurado
 class StructuredLogger:
-    # ... (Clase StructuredLogger sin cambios)
+    """Clase simple para envolver el logger y permitir datos estructurados."""
     def __init__(self, logger):
         self.logger = logger
 
-    def info(self, message, extra=None):
+    def info(self, message: str, extra: Optional[Dict[str, Any]] = None):
         log_data = {"message": message, **(extra or {})}
         self.logger.info(json.dumps(log_data))
 
-    def error(self, message, extra=None):
+    def error(self, message: str, extra: Optional[Dict[str, Any]] = None):
         log_data = {"message": message, **(extra or {})}
         self.logger.error(json.dumps(log_data))
 
@@ -47,570 +44,230 @@ structured_logger = StructuredLogger(logger)
 app = Flask(__name__)
 
 # =============================================================================
-# CONFIGURACIÓN DE CORREO Y CONSTANTES (IMAP y API)
+# CONFIGURACIÓN (Solo IMAP)
 # =============================================================================
-# Configuración IMAP (Necesaria para recibir correos)
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
-IMAP_PORT = int(os.getenv("IMAP_PORT", 993))
-IMAP_USER = os.getenv("IMAP_USER", "youchatbotpy@gmail.com")
-IMAP_PASSWORD = os.getenv("IMAP_PASSWORD", "wopahppfgakptilr")
+IMAP_USERNAME = os.getenv("IMAP_USERNAME")
+IMAP_PASSWORD = os.getenv("IMAP_PASSWORD")
+EMAIL_FOLDER = "INBOX"
 
-# Configuración API SendGrid (Necesaria para enviar correos)
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "TU_CLAVE_API_DE_SENDGRID_AQUI")
-SENDGRID_API_URL = "https://api.sendgrid.com/v3/mail/send"
-
-# Variables Globales Derivadas y Constantes
-EMAIL_ACCOUNT = os.getenv("EMAIL_ACCOUNT", IMAP_USER)
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 10)) # Intervalo de verificación en segundos (e.g., 10 segundos)
+CHECK_INTERVAL = 5  # Segundos entre chequeos
 
 # =============================================================================
-# Manejador de señales para cerrar conexiones limpiamente
+# CLASE PRINCIPAL DEL BOT (Solo para recibir correos)
 # =============================================================================
-def signal_handler(sig, frame):
-    structured_logger.info("Recibida señal de terminación, cerrando conexiones")
-    youchat_bot.is_running = False
-    youchat_bot.cerrar_conexion_imap()
-    sys.exit(0)
 
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
-
-# =============================================================================
-# FUNCIONES DEL BOT YOUCHAT
-# =============================================================================
 class YouChatBot:
+    """Clase central para manejar la conexión IMAP y el procesamiento de correos."""
     def __init__(self):
         self.is_running = False
-        self.last_check = None
-        self.processed_emails = set()
+        self.imap_connection: Optional[imaplib.IMAP4_SSL] = None
+        self.processed_emails: List[str] = [] # Almacena Message-IDs para evitar duplicados
         self.total_processed = 0
-        self.emails_sent_today = 0
-        self.last_reset = datetime.now().date()
-        self.imap_connection = None
-        self.last_reconnect = None
-        
-        if SENDGRID_API_KEY == "TU_CLAVE_API_DE_SENDGRID_AQUI":
-            structured_logger.error("¡ALERTA! SENDGRID_API_KEY no configurada. El envío de correos fallará.")
+        self.last_check: Optional[datetime] = None
 
-    def reset_email_count(self):
-        if datetime.now().date() != self.last_reset:
-            self.emails_sent_today = 0
-            self.last_reset = datetime.now().date()
-
-    def conectar_imap_robusto(self):
-        # ... (Función sin cambios - Conexión IMAP)
-        """Conexión IMAP robusta con manejo de errores"""
-        try:
-            if self.imap_connection:
-                try:
-                    self.imap_connection.noop()
-                    structured_logger.info("Conexión IMAP aún activa")
-                    return self.imap_connection
-                except:
-                    structured_logger.info("Conexión IMAP perdida, reconectando")
-                    self.imap_connection = None
-
-            structured_logger.info("Estableciendo nueva conexión IMAP")
-            mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
-            mail.login(IMAP_USER, IMAP_PASSWORD)
-            mail.select("inbox")
-            self.imap_connection = mail
-            self.last_reconnect = datetime.now()
-            structured_logger.info("Conexión IMAP establecida exitosamente")
-            return mail
-        except Exception as e:
-            structured_logger.error("Error crítico en conexión IMAP", {"error": str(e), "traceback": traceback.format_exc()})
-            self.imap_connection = None
-            return None
-
-    def verificar_conexion_imap(self):
-        # ... (Función sin cambios - Verificación IMAP)
-        """Verifica y mantiene la conexión IMAP activa"""
-        try:
-            if not self.imap_connection:
-                return self.conectar_imap_robusto()
-
-            if self.last_reconnect and (datetime.now() - self.last_reconnect).seconds > 600:
-                structured_logger.info("Reconexión programada IMAP")
-                self.cerrar_conexion_imap()
-                return self.conectar_imap_robusto()
-
-            self.imap_connection.noop()
-            return self.imap_connection
-        except Exception as e:
-            structured_logger.info("Conexión IMAP necesita reconexión", {"error": str(e)})
-            self.cerrar_conexion_imap()
-            return self.conectar_imap_robusto()
-
-    def cerrar_conexion_imap(self):
-        # ... (Función sin cambios - Cierre IMAP)
-        """Cierra la conexión IMAP de forma segura"""
-        try:
-            if self.imap_connection:
-                self.imap_connection.close()
-                self.imap_connection.logout()
-                self.imap_connection = None
-                structured_logger.info("Conexión IMAP cerrada")
-        except:
-            self.imap_connection = None
-
-    def check_smtp_health(self):
-        # ... (Función sin cambios - Verificación SendGrid API Key)
-        """Verifica la conectividad de la API de SendGrid"""
-        if SENDGRID_API_KEY and SENDGRID_API_KEY != "TU_CLAVE_API_DE_SENDGRID_AQUI":
-             structured_logger.info("Verificación de salud: API Key de SendGrid configurada.")
-             return True
-        structured_logger.error("Verificación de salud API: Clave de SendGrid faltante o por defecto.")
-        return False
-
-    def extraer_headers_youchat(self, mensaje_email):
-        # ... (Función sin cambios - Extracción de Headers YouChat)
-        """Extrae headers específicos de YouChat"""
-        headers_youchat = {}
-        headers_especificos = [
-            'Message-ID', 'Msg_id', 'Chat-Version', 'Pd',
-            'Sender-Alias', 'From-Alias', 'Thread-ID', 'User-ID',
-            'X-YouChat-Session', 'X-YouChat-Platform', 'X-YouChat-Device',
-            'Chat-ID', 'Session-ID', 'X-Chat-Signature', 'X-YouChat-Version',
-            'X-YouChat-Build', 'X-YouChat-Environment'
-        ]
-
-        for header, valor in mensaje_email.items():
-            header_lower = header.lower()
-            if any(keyword in header_lower for keyword in ['youchat', 'chat-', 'msg_', 'x-youchat', 'x-chat']):
-                # SendGrid permite headers personalizados, los agregaremos como X-Custom-Header
-                headers_youchat[f"X-YouChat-{header}"] = valor 
-            elif header in headers_especificos:
-                headers_youchat[f"X-YouChat-{header}"] = valor
-
-        structured_logger.info("Headers de YouChat extraídos y preparados para API", {"headers": list(headers_youchat.keys())})
-        return headers_youchat
-
-    def extraer_email_remitente(self, remitente):
-        # ... (Función sin cambios - Extracción de Remitente)
-        """Extrae el email del remitente de forma robusta"""
-        try:
-            _, email = parseaddr(remitente)
-            if email:
-                return email.strip()
-            structured_logger.error("Remitente sin email válido", {"remitente": remitente})
-            return None
-        except Exception as e:
-            structured_logger.error("Error extrayendo email del remitente", {"error": str(e), "remitente": remitente})
-            return None
-    
-    def decodificar_header(self, header):
-        """Decodifica un header de correo (ej. Asunto o From)"""
-        if not header:
-            return ""
-        decoded_parts = []
-        for part, encoding in decode_header(header):
-            if isinstance(part, bytes):
-                try:
-                    decoded_parts.append(part.decode(encoding or 'utf-8', errors='replace'))
-                except:
-                    decoded_parts.append(part.decode('latin-1', errors='replace'))
-            else:
-                decoded_parts.append(part)
-        return ' '.join(decoded_parts).strip()
-
-    def get_unseen_emails_data(self):
-        """NUEVA FUNCIÓN: Obtiene datos de emails no leídos para visualización"""
-        mail = self.verificar_conexion_imap()
-        if not mail:
-            return {"error": "No se pudo establecer conexión IMAP"}
-
-        try:
-            structured_logger.info("Buscando emails no leídos para /inbox")
-            estado, mensajes = mail.search(None, "UNSEEN")
-            if estado != "OK":
-                return {"error": "Error al buscar emails no leídos"}
-
-            ids_emails = mensajes[0].split()
-            emails_data = []
-
-            for id_email in ids_emails[:10]: # Limitar a los 10 más recientes para el dashboard
-                try:
-                    estado, datos_msg = mail.fetch(id_email, "(BODY.PEEK[HEADER])") # PEEK para no marcarlos como leídos
-                    if estado != "OK" or not datos_msg or not datos_msg[0]:
-                        continue
-
-                    raw_header = datos_msg[0][1].decode('utf-8', errors='ignore')
-                    
-                    # Usar email.message_from_string en lugar de message_from_bytes para el header raw
-                    mensaje = email.message_from_string(raw_header) 
-
-                    remitente_raw = mensaje.get("From", "Desconocido")
-                    asunto_raw = mensaje.get("Subject", "Sin Asunto")
-                    fecha_raw = mensaje.get("Date", "Sin Fecha")
-                    
-                    # Decodificar el remitente para visualización
-                    remitente_limpio = self.decodificar_header(remitente_raw)
-                    asunto_limpio = self.decodificar_header(asunto_raw)
-                    
-                    emails_data.append({
-                        "id": id_email.decode(),
-                        "from": remitente_limpio,
-                        "subject": asunto_limpio,
-                        "date": fecha_raw
-                    })
-                except Exception as e:
-                    structured_logger.error("Error al procesar header de email para dashboard", {"id": id_email.decode(), "error": str(e)})
-
-            return {"success": True, "count": len(emails_data), "emails": emails_data}
-        except Exception as e:
-            structured_logger.error("Error en get_unseen_emails_data", {"error": str(e), "traceback": traceback.format_exc()})
-            return {"error": "Error interno del servidor al acceder a IMAP"}
-
-    def construir_payload_sendgrid(self, destinatario, msg_id_original=None, youchat_profile_headers=None, asunto_original=None):
-        # ... (Función sin cambios - Construcción Payload SendGrid)
-        """Construye el payload JSON para la API de SendGrid"""
-        structured_logger.info("Construyendo payload JSON para SendGrid", {"destinatario": destinatario})
-
-        # Prepara el Asunto
-        asunto = "YouChat"
-        if asunto_original:
-            if not asunto_original.lower().startswith('re:'):
-                asunto = f"Re: {asunto_original}"
-            else:
-                asunto = asunto_original
-        
-        mensaje_texto = "¡Hola! Soy un bot en desarrollo. Pronto podré descargar tus Reels de Instagram."
-
-        # Prepara los Headers Personalizados
-        custom_headers = {}
-        if youchat_profile_headers and isinstance(youchat_profile_headers, dict):
-            for key, value in youchat_profile_headers.items():
-                if value:
-                    custom_headers[key] = str(value)
-        
-        # Agrega In-Reply-To y References (no siempre son bien soportados en APIs)
-        if msg_id_original:
-            clean_message_id = msg_id_original
-            if not (msg_id_original.startswith('<') and msg_id_original.endswith('>')):
-                clean_message_id = f"<{msg_id_original}>"
-            
-            custom_headers["In-Reply-To"] = clean_message_id
-            custom_headers["References"] = clean_message_id
-
-
-        payload = {
-            "personalizations": [
-                {
-                    "to": [{"email": destinatario}],
-                    "subject": asunto,
-                    "headers": custom_headers # Aquí van los headers
-                }
-            ],
-            "from": {"email": EMAIL_ACCOUNT, "name": "YouChat Bot"},
-            "content": [
-                {
-                    "type": "text/plain",
-                    "value": mensaje_texto
-                }
-            ],
-            # SendGrid puede añadir un Message-ID automáticamente, pero si el header
-            # personalizado Message-ID se incluye arriba, puede que lo use.
-        }
-        
-        return payload
-
-    def enviar_respuesta_raw(self, destinatario, msg_id_original=None, youchat_profile_headers=None, asunto_original=None):
-        # ... (Función sin cambios - Envío API SendGrid)
-        """Envía respuesta usando la API de SendGrid (Puerto 443)"""
-        if not self.check_smtp_health():
-            structured_logger.error("Envío fallido: SENDGRID_API_KEY no está configurada correctamente.")
-            return False
-
-        try:
-            structured_logger.info("Iniciando envío de respuesta VÍA API (HTTPS)", {"destinatario": destinatario})
-            
-            payload = self.construir_payload_sendgrid(
-                destinatario, msg_id_original, youchat_profile_headers, asunto_original
-            )
-            
-            self.reset_email_count()
-            if self.emails_sent_today >= 100:
-                structured_logger.warning("Límite de emails alcanzado, esperando")
-                return False
-
-            retries = 3
-            for attempt in range(retries):
-                try:
-                    headers = {
-                        "Authorization": f"Bearer {SENDGRID_API_KEY}",
-                        "Content-Type": "application/json"
-                    }
-                    
-                    structured_logger.info(f"Haciendo petición POST a SendGrid (intento {attempt + 1}/{retries})")
-                    
-                    response = requests.post(
-                        SENDGRID_API_URL, 
-                        headers=headers, 
-                        json=payload, 
-                        timeout=30
-                    )
-                    
-                    if response.status_code == 202:
-                        structured_logger.info("Respuesta API enviada exitosamente", {"destinatario": destinatario, "status_code": response.status_code})
-                        self.emails_sent_today += 1
-                        return True
-                    else:
-                        structured_logger.error(f"Error en el envío API (Status: {response.status_code})", {
-                            "response_text": response.text, 
-                            "status_code": response.status_code
-                        })
-                        raise Exception(f"API Error {response.status_code}")
-
-                except requests.exceptions.RequestException as e:
-                    structured_logger.error(f"Error de conexión HTTP en intento {attempt + 1}", {"error": str(e)})
-                    if attempt < retries - 1:
-                        sleep_time = 2 ** attempt
-                        structured_logger.info(f"Reintentando en {sleep_time} segundos")
-                        time.sleep(sleep_time)
-                    else:
-                        structured_logger.error("Falló tras todos los reintentos HTTP")
-                        return False
-        except Exception as e:
-            structured_logger.error("Error inesperado enviando respuesta VÍA API", {"error": str(e), "traceback": traceback.format_exc()})
-            return False
-
-    def procesar_emails_no_leidos(self):
-        # ... (Función sin cambios - Procesamiento IMAP y Envío API)
-        """Procesa emails no leídos con manejo robusto"""
-        mail = self.verificar_conexion_imap()
-        if not mail:
-            structured_logger.error("No se pudo establecer conexión IMAP")
-            return
-
-        structured_logger.info("Buscando emails no leídos")
-        estado, mensajes = mail.search(None, "UNSEEN")
-        if estado != "OK":
-            structured_logger.info("No hay emails nuevos o error en búsqueda")
-            return
-
-        ids_emails = mensajes[0].split()
-        if not ids_emails:
-            structured_logger.info("Cero emails no leídos encontrados")
-            return
-
-        structured_logger.info(f"{len(ids_emails)} nuevo(s) email(s) para procesar")
-        for id_email in ids_emails:
+    def connect_imap(self) -> bool:
+        """Intenta conectar y logearse al servidor IMAP."""
+        if self.imap_connection:
             try:
-                email_id = id_email.decode()
-                if email_id in self.processed_emails:
-                    structured_logger.info("Email ya procesado", {"email_id": email_id})
-                    continue
+                self.imap_connection.noop()
+                return True # Conexión existente y activa
+            except:
+                structured_logger.info("Conexión IMAP inactiva. Reintentando conectar...")
+                self.close_imap()
+        
+        if not IMAP_USERNAME or not IMAP_PASSWORD:
+            structured_logger.error("Credenciales IMAP no configuradas (IMAP_USERNAME/IMAP_PASSWORD)")
+            return False
 
-                structured_logger.info("Procesando email", {"email_id": email_id})
-                estado, datos_msg = mail.fetch(id_email, "(RFC822)")
-                if estado != "OK" or not datos_msg:
-                    structured_logger.error("Error obteniendo email o datos vacíos", {"email_id": email_id})
-                    continue
+        try:
+            self.imap_connection = imaplib.IMAP4_SSL(IMAP_SERVER)
+            self.imap_connection.login(IMAP_USERNAME, IMAP_PASSWORD)
+            self.imap_connection.select(EMAIL_FOLDER)
+            structured_logger.info("Conexión IMAP exitosa y carpeta seleccionada", {"server": IMAP_SERVER, "folder": EMAIL_FOLDER})
+            return True
+        except imaplib.IMAP4.error as e:
+            structured_logger.error("Error al conectar o logear a IMAP", {"error": str(e)})
+            self.imap_connection = None
+            return False
+        except Exception as e:
+            structured_logger.error("Error desconocido en la conexión IMAP", {"error": str(e), "traceback": traceback.format_exc()})
+            self.imap_connection = None
+            return False
 
-                email_crudo = None
-                if isinstance(datos_msg[0], tuple) and len(datos_msg[0]) >= 2:
-                    email_crudo = datos_msg[0][1]
-                elif isinstance(datos_msg[0], bytes):
-                    email_crudo = datos_msg[0]
-                else:
-                    for i, item in enumerate(datos_msg):
-                        if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], bytes):
-                            email_crudo = item[1]
-                            break
-                        elif isinstance(item, bytes):
-                            email_crudo = item
-                            break
-
-                if not email_crudo:
-                    structured_logger.error("No se pudieron extraer datos del email", {"email_id": email_id})
-                    continue
-
-                mensaje = email.message_from_bytes(email_crudo)
-                remitente = mensaje["From"]
-                asunto_original = mensaje.get("Subject", "")
-                email_remitente = self.extraer_email_remitente(remitente)
-
-                if not email_remitente:
-                    structured_logger.error("No se pudo extraer email del remitente", {"remitente": remitente})
-                    continue
-
-                structured_logger.info("Procesando mensaje", {"remitente": email_remitente, "asunto": asunto_original})
-                headers_youchat = self.extraer_headers_youchat(mensaje)
-                msg_id_original = mensaje.get('Message-ID') or headers_youchat.get('Message-ID')
-
-                exito = self.enviar_respuesta_raw(
-                    email_remitente,
-                    msg_id_original=msg_id_original,
-                    youchat_profile_headers=headers_youchat,
-                    asunto_original=asunto_original
-                )
-
-                if exito:
-                    self.processed_emails.add(email_id)
-                    self.total_processed += 1
-                    # Marcar como leído
-                    mail.store(id_email, '+FLAGS', '\\Seen') 
-                    structured_logger.info(f"Respuesta #{self.total_processed} enviada exitosamente VÍA API", {"remitente": email_remitente})
-                else:
-                    structured_logger.error("Falló el envío de la respuesta", {"remitente": email_remitente})
-
+    def close_imap(self):
+        """Cierra la conexión IMAP."""
+        if self.imap_connection:
+            try:
+                self.imap_connection.logout()
+                structured_logger.info("Conexión IMAP cerrada.")
             except Exception as e:
-                structured_logger.error("Error procesando email", {"email_id": email_id, "error": str(e), "traceback": traceback.format_exc()})
+                structured_logger.error("Error al cerrar conexión IMAP", {"error": str(e)})
+            self.imap_connection = None
 
-    def limpiar_emails_procesados(self, max_age_hours=24):
-        # ... (Función sin cambios - Limpieza de emails procesados)
-        """Limpia emails procesados para evitar consumo excesivo de memoria"""
-        if len(self.processed_emails) > 1000:
-            structured_logger.info("Limpiando emails procesados antiguos")
-            self.processed_emails.clear()
+    def fetch_new_emails(self) -> List[Dict[str, str]]:
+        """Busca y descarga correos no procesados."""
+        new_emails_data = []
+        if not self.connect_imap() or not self.imap_connection:
+            return new_emails_data
+
+        try:
+            # Buscar correos no leídos
+            status, email_ids = self.imap_connection.search(None, 'UNSEEN')
+            if status != 'OK':
+                structured_logger.info("No se encontraron correos nuevos.")
+                return new_emails_data
+
+            id_list = email_ids[0].split()
+            structured_logger.info(f"Correos encontrados: {len(id_list)}", {"count": len(id_list)})
+
+            for email_id in id_list:
+                status, msg_data = self.imap_connection.fetch(email_id, '(RFC822)')
+                if status != 'OK':
+                    continue
+
+                msg = email.message_from_bytes(msg_data[0][1])
+                message_id = msg.get('Message-ID', f"No-ID-{uuid.uuid4()}")
+
+                if message_id in self.processed_emails:
+                    continue
+                
+                # Intentar marcar como leído para evitar procesarlo de nuevo en la próxima ejecución
+                # Aún si falla la marca, el Message-ID lo protege.
+                try:
+                    self.imap_connection.store(email_id, '+FLAGS', '\\Seen')
+                except Exception as e:
+                    structured_logger.error("Fallo al marcar el correo como leído", {"id": email_id, "error": str(e)})
+
+                # Extraer cuerpo del correo (solo texto plano)
+                body = self._get_email_body(msg)
+                
+                # Construir el objeto de correo
+                sender_name, sender_email = parseaddr(msg.get('From'))
+                subject = msg.get('Subject', 'Sin Asunto')
+                
+                new_email_data = {
+                    "id": message_id,
+                    "from_name": sender_name,
+                    "from_email": sender_email,
+                    "subject": subject,
+                    "body_snippet": body[:200] + "..." if len(body) > 200 else body,
+                    "date": formatdate(datetime.now().timestamp(), localtime=True)
+                }
+                
+                new_emails_data.append(new_email_data)
+                self.processed_emails.append(message_id)
+                self.total_processed += 1
+
+            self.imap_connection.expunge() # Elimina mensajes marcados para borrado (si los hubiera)
+        except Exception as e:
+            structured_logger.error("Error al procesar correos", {"error": str(e), "traceback": traceback.format_exc()})
+            self.close_imap() # Forzar reconexión
+            
+        return new_emails_data
+
+    def _get_email_body(self, msg: email.message.Message) -> str:
+        """Extrae el cuerpo de texto plano del objeto de correo."""
+        if msg.is_multipart():
+            for part in msg.walk():
+                ctype = part.get_content_type()
+                cdispo = str(part.get('Content-Disposition'))
+
+                # Buscar la parte de texto plano, ignorando archivos adjuntos
+                if ctype == 'text/plain' and 'attachment' not in cdispo:
+                    try:
+                        return part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8', errors='ignore')
+                    except:
+                        return "Error al decodificar el cuerpo del correo."
+        else:
+            try:
+                return msg.get_payload(decode=True).decode(msg.get_content_charset() or 'utf-8', errors='ignore')
+            except:
+                return "Error al decodificar el cuerpo del correo."
+        return "Cuerpo de correo no disponible (solo HTML o adjuntos)."
 
     def run_bot(self):
-        # ... (Función sin cambios - Bucle Principal)
-        """Ejecuta el bot en un bucle continuo"""
-        self.is_running = True
-        structured_logger.info("Bot YouChat INICIADO - VERSIÓN CON API SENDGRID", {"interval": CHECK_INTERVAL, "email_account": EMAIL_ACCOUNT})
-        consecutive_errors = 0
-        max_consecutive_errors = 5
-
+        """Bucle principal de ejecución del bot."""
+        structured_logger.info("Bot en funcionamiento...")
         while self.is_running:
             try:
+                # 1. Chequear y procesar correos nuevos
+                new_emails = self.fetch_new_emails()
+                if new_emails:
+                    structured_logger.info(f"Nuevos correos procesados: {len(new_emails)}", {"new_count": len(new_emails)})
+                    # Aquí es donde se podría implementar una cola para pasar los datos al frontend.
+                    # Por ahora, solo se registran, y el endpoint /inbox los expone.
+                
                 self.last_check = datetime.now()
-                structured_logger.info("Revisando nuevos emails", {"timestamp": self.last_check.strftime('%H:%M:%S')})
-                self.procesar_emails_no_leidos()
-                self.limpiar_emails_procesados()
-                consecutive_errors = 0
-                time.sleep(CHECK_INTERVAL)
-            except KeyboardInterrupt:
-                structured_logger.info("Interrupción detectada, deteniendo bot")
-                self.is_running = False
-                break
+                
             except Exception as e:
-                consecutive_errors += 1
-                structured_logger.error(f"Error #{consecutive_errors} en el bucle principal", {"error": str(e), "traceback": traceback.format_exc()})
-                if consecutive_errors >= max_consecutive_errors:
-                    structured_logger.error("Demasiados errores consecutivos, reiniciando conexiones")
-                    self.cerrar_conexion_imap()
-                    consecutive_errors = 0
-                    time.sleep(10)
-                else:
-                    time.sleep(CHECK_INTERVAL)
-        self.cerrar_conexion_imap()
-        structured_logger.info("Bot YouChat detenido")
+                structured_logger.error("Fallo inesperado en el bucle principal del bot", {"error": str(e), "traceback": traceback.format_exc()})
+                self.close_imap()
+
+            time.sleep(CHECK_INTERVAL)
 
 # =============================================================================
-# INSTANCIA GLOBAL DEL BOT
+# INICIALIZACIÓN Y ENDPOINTS WEB
 # =============================================================================
 youchat_bot = YouChatBot()
-bot_thread = None
 
-# =============================================================================
-# RUTAS DEL SERVICIO WEB
-# =============================================================================
-@app.route('/')
-def home():
-    # En lugar de devolver un JSON, ahora devolvemos el archivo index.html
-    return send_from_directory('.', 'index.html') 
-
-@app.route('/inbox')
-def inbox():
-    """NUEVA RUTA: Devuelve la lista de correos no leídos como JSON."""
-    data = youchat_bot.get_unseen_emails_data()
-    return jsonify(data)
-
-@app.route('/health')
-def health():
-    # ... (Ruta health sin cambios)
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "bot_running": youchat_bot.is_running,
-        "imap_connected": youchat_bot.imap_connection is not None,
-        "smtp_reachable": youchat_bot.check_smtp_health(), 
-        "memory_usage": f"{len(youchat_bot.processed_emails)} emails procesados"
-    })
-
-@app.route('/smtp_health')
-def smtp_health():
-    # ... (Ruta smtp_health sin cambios)
-    return jsonify({"api_key_configured": youchat_bot.check_smtp_health()})
-
-@app.route('/start')
-def start_bot():
-    # ... (Ruta start sin cambios)
-    global bot_thread
-    if youchat_bot.is_running:
-        return jsonify({
-            "status": "already_running",
-            "message": "El bot ya está en ejecución",
-            "total_processed": youchat_bot.total_processed
-        })
-    youchat_bot.is_running = True
-    bot_thread = threading.Thread(target=youchat_bot.run_bot, daemon=True)
-    bot_thread.start()
-    structured_logger.info("Bot iniciado correctamente")
-    return jsonify({
-        "status": "started",
-        "message": "Bot iniciado correctamente",
-        "features": "Conexión IMAP y envío por API SendGrid activada"
-    })
-
-@app.route('/stop')
-def stop_bot():
-    # ... (Ruta stop sin cambios)
-    youchat_bot.is_running = False
-    youchat_bot.cerrar_conexion_imap()
-    structured_logger.info("Bot detenido")
-    return jsonify({
-        "status": "stopped",
-        "message": "Bot detenido",
-        "final_stats": {
-            "total_processed": youchat_bot.total_processed,
-            "last_check": youchat_bot.last_check.isoformat() if youchat_bot.last_check else None
-        }
-    })
-
-@app.route('/status')
-def status():
-    # ... (Ruta status sin cambios)
+@app.route('/status', methods=['GET'])
+def get_status():
+    """Retorna el estado operativo del bot (solo IMAP)."""
     return jsonify({
         "is_running": youchat_bot.is_running,
-        "last_check": youchat_bot.last_check.isoformat() if youchat_bot.last_check else None,
-        "total_processed": youchat_bot.total_processed,
-        "emails_sent_today": youchat_bot.emails_sent_today,
-        "check_interval": CHECK_INTERVAL,
-        "processed_emails_count": len(youchat_bot.processed_emails),
+        "last_check": youchat_bot.last_check.strftime("%Y-%m-%d %H:%M:%S") if youchat_bot.last_check else None,
+        "total_emails_processed": youchat_bot.total_processed,
+        "check_interval_seconds": CHECK_INTERVAL,
+        "unique_emails_tracked": len(youchat_bot.processed_emails),
         "imap_connected": youchat_bot.imap_connection is not None,
-        "api_key_configured": youchat_bot.check_smtp_health()
     })
 
-# =============================================================================
-# INICIALIZACIÓN AUTOMÁTICA
-# =============================================================================
+@app.route('/inbox', methods=['GET'])
+def get_inbox():
+    """Retorna la lista de correos procesados (para simular el frontend)."""
+    # En una aplicación real, probablemente harías una nueva búsqueda o devolverías
+    # la cola de nuevos correos. Aquí, devolvemos la lista de IDs procesados.
+    return jsonify({
+        "processed_ids": youchat_bot.processed_emails,
+        "total_count": youchat_bot.total_processed,
+        "message": "Lista de IDs de correos procesados."
+    })
+
+
 def inicializar_bot():
-    # ... (Inicialización sin cambios)
     """Inicializa el bot automáticamente al cargar la aplicación"""
     global bot_thread
-    structured_logger.info("Iniciando bot automáticamente", {
-        "version": "3.0",
+    structured_logger.info("Iniciando bot IMAP (sin SMTP)...", {
+        "version": "2.5 (IMAP Only)",
         "features": [
             "Conexión IMAP persistente",
             "Reconexión automática",
             "Manejo robusto de errores",
-            "Envío por API SendGrid", 
-            "Headers optimizados"
+            "Logging estructurado",
+            "Chequeo de nuevos correos"
         ]
     })
     youchat_bot.is_running = True
     bot_thread = threading.Thread(target=youchat_bot.run_bot, daemon=True)
     bot_thread.start()
-    structured_logger.info("Bot iniciado y listo para recibir mensajes")
+    structured_logger.info("Bot iniciado y listo.")
 
 # Iniciar el bot cuando se carga la aplicación
 inicializar_bot()
 
 if __name__ == '__main__':
-    # Requiere instalar la librería requests: pip install requests
     port = int(os.environ.get('PORT', 10000))
-    structured_logger.info("Iniciando servidor web", {"port": port})
-    app.run(host='0.0.0.0', port=port, debug=False)
+    # Aquí se utiliza '0.0.0.0' para que sea accesible externamente en el entorno de Render/Canvas
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+
+# Manejo de apagado del bot para cerrar la conexión IMAP
+def signal_handler(sig, frame):
+    structured_logger.info("Señal de apagado recibida. Deteniendo bot...")
+    youchat_bot.is_running = False
+    if youchat_bot.imap_connection:
+        youchat_bot.close_imap()
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
