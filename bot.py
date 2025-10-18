@@ -46,23 +46,23 @@ app = Flask(__name__)
 # =============================================================================
 # CONFIGURACIÓN DE CORREO Y CONSTANTES
 # =============================================================================
-# Configuración IMAP
+# Las variables IMAP son la fuente principal de las credenciales
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
 IMAP_PORT = int(os.getenv("IMAP_PORT", 993))
 IMAP_USER = os.getenv("IMAP_USER", "youchatbotpy@gmail.com")
 IMAP_PASSWORD = os.getenv("IMAP_PASSWORD", "wopahppfgakptilr")
 
 # Variables Globales Derivadas y Constantes
-# Las variables usadas en el logging y las rutas de Flask estaban faltando
 EMAIL_ACCOUNT = os.getenv("EMAIL_ACCOUNT", IMAP_USER)
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", IMAP_PASSWORD)
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+# CAMBIO CLAVE: Usamos el puerto 465 (SMTP_SSL) para mayor estabilidad
+SMTP_PORT = int(os.getenv("SMTP_PORT", 465))
+# Nombre definido para resolver el NameError
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 10)) # Intervalo de verificación en segundos (e.g., 10 segundos)
 
 # =============================================================================
 # Manejador de señales para cerrar conexiones limpiamente
-# ... (el resto del código sigue igual)
 # =============================================================================
 def signal_handler(sig, frame):
     structured_logger.info("Recibida señal de terminación, cerrando conexiones")
@@ -147,14 +147,15 @@ class YouChatBot:
             self.imap_connection = None
 
     def check_smtp_health(self):
-        """Verifica la conectividad con el servidor SMTP"""
+        """Verifica la conectividad con el servidor SMTP usando SSL"""
         try:
-            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as servidor:
+            # USANDO SMTP_SSL para puerto 465
+            with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=10) as servidor:
                 servidor.noop()
-            structured_logger.info("Servidor SMTP accesible")
+            structured_logger.info("Servidor SMTP accesible (SSL)")
             return True
         except Exception as e:
-            structured_logger.error("Verificación de salud SMTP falló", {"error": str(e)})
+            structured_logger.error("Verificación de salud SMTP falló (SSL)", {"error": str(e)})
             return False
 
     def extraer_headers_youchat(self, mensaje_email):
@@ -261,7 +262,7 @@ class YouChatBot:
             return None
 
     def enviar_respuesta_raw(self, destinatario, msg_id_original=None, youchat_profile_headers=None, asunto_original=None):
-        """Envía respuesta usando formato RAW con reintentos"""
+        """Envía respuesta usando formato RAW con reintentos y SMTP_SSL"""
         try:
             structured_logger.info("Iniciando envío de respuesta RAW", {"destinatario": destinatario})
             mensaje_raw = self.construir_mensaje_raw_youchat(
@@ -280,9 +281,8 @@ class YouChatBot:
             for attempt in range(retries):
                 try:
                     structured_logger.info(f"Conectando al servidor SMTP (intento {attempt + 1}/{retries})")
-                    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30) as servidor:
-                        structured_logger.info("Iniciando TLS")
-                        servidor.starttls()
+                    # USANDO smtplib.SMTP_SSL para el puerto 465
+                    with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=30) as servidor:
                         structured_logger.info("Autenticando con Gmail")
                         servidor.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
                         structured_logger.info("Enviando email")
@@ -400,7 +400,6 @@ class YouChatBot:
     def run_bot(self):
         """Ejecuta el bot en un bucle continuo"""
         self.is_running = True
-        # LINEA 393 CORREGIDA
         structured_logger.info("Bot YouChat INICIADO - VERSIÓN CON CONEXIÓN ROBUSTA", {"interval": CHECK_INTERVAL, "email_account": EMAIL_ACCOUNT})
         consecutive_errors = 0
         max_consecutive_errors = 5
@@ -441,7 +440,6 @@ bot_thread = None
 # =============================================================================
 @app.route('/')
 def home():
-    # LINEA 445 CORREGIDA
     return jsonify({
         "status": "online",
         "service": "YouChat Bot - Conexión Robusta",
@@ -451,7 +449,7 @@ def home():
             "Reconexión automática",
             "Manejo robusto de errores",
             "Logging estructurado y rotación",
-            "Reintentos SMTP",
+            "Reintentos SMTP (SSL)",
             "Headers optimizados"
         ],
         "interval": f"{CHECK_INTERVAL} segundos",
@@ -513,7 +511,6 @@ def stop_bot():
 
 @app.route('/status')
 def status():
-    # LINEA 508 CORREGIDA
     return jsonify({
         "is_running": youchat_bot.is_running,
         "last_check": youchat_bot.last_check.isoformat() if youchat_bot.last_check else None,
@@ -538,7 +535,7 @@ def inicializar_bot():
             "Reconexión automática",
             "Manejo robusto de errores",
             "Logging estructurado",
-            "Reintentos SMTP",
+            "Reintentos SMTP (SSL)",
             "Headers optimizados"
         ]
     })
