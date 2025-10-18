@@ -48,8 +48,8 @@ app = Flask(__name__)
 # =============================================================================
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
 IMAP_PORT = int(os.getenv("IMAP_PORT", 993))
-IMAP_USER = os.getenv("IMAP_USER", "tu_email@gmail.com")
-IMAP_PASSWORD = os.getenv("IMAP_PASSWORD", "TU_CONTRASEÑA_DE_APLICACIÓN")
+IMAP_USER = os.getenv("IMAP_USER", "youchatbotpy@gmail.com")
+IMAP_PASSWORD = os.getenv("IMAP_PASSWORD", "wopahppfgakptilr")
 
 # =============================================================================
 # Manejador de señales para cerrar conexiones limpiamente
