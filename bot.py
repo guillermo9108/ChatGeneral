@@ -10,13 +10,14 @@ from datetime import datetime
 import traceback
 import sys
 import json
+import signal
 from email.utils import parseaddr, formatdate
 import uuid
 from typing import Optional, Dict, Any, List
 
-# Configuración de logging mejorada con rotación
+# Configuración de logging mejorada
 logging.basicConfig(
-    level=logging.INFO,  # INFO para un entorno de producción, DEBUG para desarrollo
+    level=logging.INFO,  
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
@@ -53,6 +54,15 @@ EMAIL_FOLDER = "INBOX"
 
 CHECK_INTERVAL = 5  # Segundos entre chequeos
 
+# Comprobación de credenciales al inicio del script
+if not IMAP_USERNAME or not IMAP_PASSWORD:
+    structured_logger.error("Error: Las credenciales IMAP no están configuradas. Por favor, define las variables de entorno IMAP_USERNAME y IMAP_PASSWORD.")
+    # Forzar la salida del programa si las credenciales son críticas y faltan
+    # Esto evita que el bot se ejecute sin poder hacer su trabajo principal.
+    # sys.exit(1) # Descomentar esto si quieres que falle la app al inicio sin credenciales.
+    pass # Permite que la aplicación web se inicie, pero el bot IMAP fallará.
+
+
 # =============================================================================
 # CLASE PRINCIPAL DEL BOT (Solo para recibir correos)
 # =============================================================================
@@ -62,24 +72,29 @@ class YouChatBot:
     def __init__(self):
         self.is_running = False
         self.imap_connection: Optional[imaplib.IMAP4_SSL] = None
-        self.processed_emails: List[str] = [] # Almacena Message-IDs para evitar duplicados
+        self.processed_emails: List[Dict[str, Any]] = [] # Almacena datos del correo procesado
         self.total_processed = 0
         self.last_check: Optional[datetime] = None
 
     def connect_imap(self) -> bool:
         """Intenta conectar y logearse al servidor IMAP."""
-        if self.imap_connection:
-            try:
-                self.imap_connection.noop()
-                return True # Conexión existente y activa
-            except:
-                structured_logger.info("Conexión IMAP inactiva. Reintentando conectar...")
-                self.close_imap()
-        
         if not IMAP_USERNAME or not IMAP_PASSWORD:
-            structured_logger.error("Credenciales IMAP no configuradas (IMAP_USERNAME/IMAP_PASSWORD)")
+            # Este error ya fue registrado arriba, pero lo repetimos por si acaso
+            structured_logger.error("Credenciales IMAP no configuradas (IMAP_USERNAME/IMAP_PASSWORD). No se puede conectar.")
             return False
 
+        if self.imap_connection:
+            try:
+                # Comprobar si la conexión es válida
+                status, _ = self.imap_connection.noop()
+                if status == 'OK':
+                    return True # Conexión existente y activa
+                structured_logger.info("Conexión IMAP inactiva o caducada. Reintentando conectar...")
+                self.close_imap()
+            except Exception:
+                structured_logger.info("Conexión IMAP fallida. Reintentando conectar...")
+                self.close_imap()
+        
         try:
             self.imap_connection = imaplib.IMAP4_SSL(IMAP_SERVER)
             self.imap_connection.login(IMAP_USERNAME, IMAP_PASSWORD)
@@ -87,7 +102,7 @@ class YouChatBot:
             structured_logger.info("Conexión IMAP exitosa y carpeta seleccionada", {"server": IMAP_SERVER, "folder": EMAIL_FOLDER})
             return True
         except imaplib.IMAP4.error as e:
-            structured_logger.error("Error al conectar o logear a IMAP", {"error": str(e)})
+            structured_logger.error("Error al conectar o logear a IMAP. Revisa las credenciales.", {"error": str(e)})
             self.imap_connection = None
             return False
         except Exception as e:
@@ -99,23 +114,27 @@ class YouChatBot:
         """Cierra la conexión IMAP."""
         if self.imap_connection:
             try:
+                # Intenta hacer logout de forma segura
                 self.imap_connection.logout()
                 structured_logger.info("Conexión IMAP cerrada.")
             except Exception as e:
-                structured_logger.error("Error al cerrar conexión IMAP", {"error": str(e)})
+                # Captura errores al intentar cerrar una conexión ya rota
+                structured_logger.error("Error al intentar cerrar conexión IMAP", {"error": str(e)})
             self.imap_connection = None
 
-    def fetch_new_emails(self) -> List[Dict[str, str]]:
+    def fetch_new_emails(self) -> List[Dict[str, Any]]:
         """Busca y descarga correos no procesados."""
-        new_emails_data = []
+        new_emails_data: List[Dict[str, Any]] = []
+        
+        # Conexión fallida o credenciales ausentes
         if not self.connect_imap() or not self.imap_connection:
             return new_emails_data
 
         try:
             # Buscar correos no leídos
             status, email_ids = self.imap_connection.search(None, 'UNSEEN')
-            if status != 'OK':
-                structured_logger.info("No se encontraron correos nuevos.")
+            if status != 'OK' or not email_ids[0]:
+                # structured_logger.info("No se encontraron correos nuevos.") # Silenciamiento para evitar spam de logs
                 return new_emails_data
 
             id_list = email_ids[0].split()
@@ -127,77 +146,70 @@ class YouChatBot:
                     continue
 
                 msg = email.message_from_bytes(msg_data[0][1])
+                # Usar Message-ID como ID único, o generar uno si falta
                 message_id = msg.get('Message-ID', f"No-ID-{uuid.uuid4()}")
 
-                if message_id in self.processed_emails:
+                # Comprobar si ya fue procesado (esto evita repeticiones si la marca \Seen falla)
+                if any(email['id'] == message_id for email in self.processed_emails):
                     continue
                 
-                # Intentar marcar como leído para evitar procesarlo de nuevo en la próxima ejecución
-                # Aún si falla la marca, el Message-ID lo protege.
+                # Marcar como leído para que no aparezca en la siguiente búsqueda UNSEEN
                 try:
                     self.imap_connection.store(email_id, '+FLAGS', '\\Seen')
                 except Exception as e:
-                    structured_logger.error("Fallo al marcar el correo como leído", {"id": email_id, "error": str(e)})
+                    structured_logger.error("Fallo al marcar el correo como leído (continuando)", {"id": email_id, "error": str(e)})
 
-                # Extraer cuerpo del correo (solo texto plano)
+                # Extraer datos del correo
                 body = self._get_email_body(msg)
-                
-                # Construir el objeto de correo
                 sender_name, sender_email = parseaddr(msg.get('From'))
-                subject = msg.get('Subject', 'Sin Asunto')
                 
                 new_email_data = {
                     "id": message_id,
                     "from_name": sender_name,
                     "from_email": sender_email,
-                    "subject": subject,
+                    "subject": msg.get('Subject', 'Sin Asunto'),
                     "body_snippet": body[:200] + "..." if len(body) > 200 else body,
-                    "date": formatdate(datetime.now().timestamp(), localtime=True)
+                    "date": msg.get('Date', formatdate(datetime.now().timestamp(), localtime=True))
                 }
                 
+                # Almacenar el correo completo en la lista de procesados
                 new_emails_data.append(new_email_data)
-                self.processed_emails.append(message_id)
+                self.processed_emails.insert(0, new_email_data) # Añadir al principio para mostrar lo más nuevo primero
                 self.total_processed += 1
 
-            self.imap_connection.expunge() # Elimina mensajes marcados para borrado (si los hubiera)
+            self.imap_connection.expunge()
         except Exception as e:
-            structured_logger.error("Error al procesar correos", {"error": str(e), "traceback": traceback.format_exc()})
+            structured_logger.error("Error al procesar correos. Forzando reconexión.", {"error": str(e), "traceback": traceback.format_exc()})
             self.close_imap() # Forzar reconexión
             
         return new_emails_data
 
     def _get_email_body(self, msg: email.message.Message) -> str:
         """Extrae el cuerpo de texto plano del objeto de correo."""
-        if msg.is_multipart():
-            for part in msg.walk():
-                ctype = part.get_content_type()
-                cdispo = str(part.get('Content-Disposition'))
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            cdispo = str(part.get('Content-Disposition'))
 
-                # Buscar la parte de texto plano, ignorando archivos adjuntos
-                if ctype == 'text/plain' and 'attachment' not in cdispo:
-                    try:
-                        return part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8', errors='ignore')
-                    except:
-                        return "Error al decodificar el cuerpo del correo."
-        else:
-            try:
-                return msg.get_payload(decode=True).decode(msg.get_content_charset() or 'utf-8', errors='ignore')
-            except:
-                return "Error al decodificar el cuerpo del correo."
+            if ctype == 'text/plain' and 'attachment' not in cdispo:
+                try:
+                    # Intenta decodificar usando el charset del correo o UTF-8 por defecto
+                    return part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8', errors='ignore').strip()
+                except:
+                    return "Error al decodificar el cuerpo del correo."
+        
         return "Cuerpo de correo no disponible (solo HTML o adjuntos)."
 
     def run_bot(self):
         """Bucle principal de ejecución del bot."""
-        structured_logger.info("Bot en funcionamiento...")
+        if not IMAP_USERNAME or not IMAP_PASSWORD:
+            structured_logger.error("Bot IMAP detenido: Credenciales no disponibles.")
+            self.is_running = False
+            return
+
+        structured_logger.info("Bot en funcionamiento, chequeando cada %s segundos...", CHECK_INTERVAL)
         while self.is_running:
             try:
-                # 1. Chequear y procesar correos nuevos
-                new_emails = self.fetch_new_emails()
-                if new_emails:
-                    structured_logger.info(f"Nuevos correos procesados: {len(new_emails)}", {"new_count": len(new_emails)})
-                    # Aquí es donde se podría implementar una cola para pasar los datos al frontend.
-                    # Por ahora, solo se registran, y el endpoint /inbox los expone.
-                
+                self.fetch_new_emails()
                 self.last_check = datetime.now()
                 
             except Exception as e:
@@ -207,7 +219,7 @@ class YouChatBot:
             time.sleep(CHECK_INTERVAL)
 
 # =============================================================================
-# INICIALIZACIÓN Y ENDPOINTS WEB
+# ENDPOINTS WEB
 # =============================================================================
 youchat_bot = YouChatBot()
 
@@ -221,47 +233,40 @@ def get_status():
         "check_interval_seconds": CHECK_INTERVAL,
         "unique_emails_tracked": len(youchat_bot.processed_emails),
         "imap_connected": youchat_bot.imap_connection is not None,
+        "imap_username_set": IMAP_USERNAME is not None,
     })
 
 @app.route('/inbox', methods=['GET'])
 def get_inbox():
-    """Retorna la lista de correos procesados (para simular el frontend)."""
-    # En una aplicación real, probablemente harías una nueva búsqueda o devolverías
-    # la cola de nuevos correos. Aquí, devolvemos la lista de IDs procesados.
+    """Retorna la lista de correos procesados (los últimos 50)."""
     return jsonify({
-        "processed_ids": youchat_bot.processed_emails,
+        "emails": youchat_bot.processed_emails[:50], # Devuelve solo los 50 más recientes
         "total_count": youchat_bot.total_processed,
-        "message": "Lista de IDs de correos procesados."
+        "message": "Lista de correos procesados."
     })
 
 
 def inicializar_bot():
     """Inicializa el bot automáticamente al cargar la aplicación"""
     global bot_thread
-    structured_logger.info("Iniciando bot IMAP (sin SMTP)...", {
-        "version": "2.5 (IMAP Only)",
-        "features": [
-            "Conexión IMAP persistente",
-            "Reconexión automática",
-            "Manejo robusto de errores",
-            "Logging estructurado",
-            "Chequeo de nuevos correos"
-        ]
-    })
+    structured_logger.info("Iniciando bot IMAP (sin SMTP)...")
     youchat_bot.is_running = True
     bot_thread = threading.Thread(target=youchat_bot.run_bot, daemon=True)
     bot_thread.start()
     structured_logger.info("Bot iniciado y listo.")
 
 # Iniciar el bot cuando se carga la aplicación
-inicializar_bot()
+if IMAP_USERNAME and IMAP_PASSWORD:
+    inicializar_bot()
+else:
+    structured_logger.error("IMAP Bot no se pudo iniciar: Faltan credenciales críticas.")
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
-    # Aquí se utiliza '0.0.0.0' para que sea accesible externamente en el entorno de Render/Canvas
+    # Aquí se utiliza '0.0.0.0' para que sea accesible externamente
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
 
-# Manejo de apagado del bot para cerrar la conexión IMAP
+# Manejo de apagado del bot
 def signal_handler(sig, frame):
     structured_logger.info("Señal de apagado recibida. Deteniendo bot...")
     youchat_bot.is_running = False
