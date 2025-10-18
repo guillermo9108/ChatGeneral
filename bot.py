@@ -26,18 +26,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Clase para logging estructurado
+# Clase para logging estructurado (Ahora más robusta contra errores de tipado en 'extra')
 class StructuredLogger:
     """Clase simple para envolver el logger y permitir datos estructurados."""
     def __init__(self, logger):
         self.logger = logger
 
-    def info(self, message: str, extra: Optional[Dict[str, Any]] = None):
-        log_data = {"message": message, **(extra or {})}
+    def info(self, message: str, extra: Optional[Dict[str, Any]] = None, **kwargs):
+        # Aseguramos que 'extra' sea un dict si se proporciona, o usamos kwargs
+        final_extra = extra if isinstance(extra, dict) else {}
+        log_data = {"message": message, **final_extra, **kwargs}
         self.logger.info(json.dumps(log_data))
 
-    def error(self, message: str, extra: Optional[Dict[str, Any]] = None):
-        log_data = {"message": message, **(extra or {})}
+    def error(self, message: str, extra: Optional[Dict[str, Any]] = None, **kwargs):
+        # Aseguramos que 'extra' sea un dict si se proporciona, o usamos kwargs
+        final_extra = extra if isinstance(extra, dict) else {}
+        log_data = {"message": message, **final_extra, **kwargs}
         self.logger.error(json.dumps(log_data))
 
 structured_logger = StructuredLogger(logger)
@@ -45,23 +49,14 @@ structured_logger = StructuredLogger(logger)
 app = Flask(__name__)
 
 # =============================================================================
-# CONFIGURACIÓN (Solo IMAP) - VALORES POR DEFECTO AÑADIDOS
+# CONFIGURACIÓN (Solo IMAP) - CREDENCIALES POR DEFECTO
 # =============================================================================
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
-# Usando los valores de tu captura de pantalla como valores por defecto:
 IMAP_USER = os.getenv("IMAP_USER", "youchatbotpy@gmail.com")
 IMAP_PASSWORD = os.getenv("IMAP_PASSWORD", "wopahppfgakptilr")
 
 EMAIL_FOLDER = "INBOX"
 CHECK_INTERVAL = 5  # Segundos entre chequeos
-
-# Comprobación de credenciales al inicio del script
-if not IMAP_USER or not IMAP_PASSWORD:
-    # Este bloque solo se ejecutaría si las variables de entorno se definen como vacías,
-    # ya que ahora tenemos valores por defecto.
-    structured_logger.error("Error: Las credenciales IMAP no están configuradas (IMAP_USER/IMAP_PASSWORD).")
-    pass 
-
 
 # =============================================================================
 # CLASE PRINCIPAL DEL BOT (Solo para recibir correos)
@@ -72,13 +67,12 @@ class YouChatBot:
     def __init__(self):
         self.is_running = False
         self.imap_connection: Optional[imaplib.IMAP4_SSL] = None
-        self.processed_emails: List[Dict[str, Any]] = [] # Almacena datos del correo procesado
+        self.processed_emails: List[Dict[str, Any]] = [] 
         self.total_processed = 0
         self.last_check: Optional[datetime] = None
 
     def connect_imap(self) -> bool:
         """Intenta conectar y logearse al servidor IMAP."""
-        # Se usa IMAP_USER e IMAP_PASSWORD, que ahora tienen valores por defecto
         if not IMAP_USER or not IMAP_PASSWORD:
             structured_logger.error("Credenciales IMAP no configuradas (IMAP_USER/IMAP_PASSWORD). No se puede conectar.")
             return False
@@ -88,7 +82,7 @@ class YouChatBot:
                 # Comprobar si la conexión es válida
                 status, _ = self.imap_connection.noop()
                 if status == 'OK':
-                    return True # Conexión existente y activa
+                    return True
                 structured_logger.info("Conexión IMAP inactiva o caducada. Reintentando conectar...")
                 self.close_imap()
             except Exception:
@@ -97,7 +91,6 @@ class YouChatBot:
         
         try:
             self.imap_connection = imaplib.IMAP4_SSL(IMAP_SERVER)
-            # USANDO IMAP_USER y IMAP_PASSWORD
             self.imap_connection.login(IMAP_USER, IMAP_PASSWORD)
             self.imap_connection.select(EMAIL_FOLDER)
             structured_logger.info("Conexión IMAP exitosa y carpeta seleccionada", {"server": IMAP_SERVER, "folder": EMAIL_FOLDER})
@@ -129,7 +122,6 @@ class YouChatBot:
             return new_emails_data
 
         try:
-            # Buscar correos no leídos
             status, email_ids = self.imap_connection.search(None, 'UNSEEN')
             if status != 'OK' or not email_ids[0]:
                 return new_emails_data
@@ -164,15 +156,14 @@ class YouChatBot:
                     "date": msg.get('Date', formatdate(datetime.now().timestamp(), localtime=True))
                 }
                 
-                # Almacenar el correo completo en la lista de procesados
                 new_emails_data.append(new_email_data)
-                self.processed_emails.insert(0, new_email_data) # Añadir al principio para mostrar lo más nuevo primero
+                self.processed_emails.insert(0, new_email_data)
                 self.total_processed += 1
 
             self.imap_connection.expunge()
         except Exception as e:
             structured_logger.error("Error al procesar correos. Forzando reconexión.", {"error": str(e), "traceback": traceback.format_exc()})
-            self.close_imap() # Forzar reconexión
+            self.close_imap()
             
         return new_emails_data
 
@@ -197,7 +188,9 @@ class YouChatBot:
             self.is_running = False
             return
 
-        structured_logger.info("Bot en funcionamiento, chequeando cada %s segundos...", CHECK_INTERVAL)
+        # CORRECCIÓN: Usar f-string o format() para incluir CHECK_INTERVAL en el mensaje
+        structured_logger.info(f"Bot en funcionamiento, chequeando cada {CHECK_INTERVAL} segundos...")
+        
         while self.is_running:
             try:
                 self.fetch_new_emails()
@@ -231,7 +224,7 @@ def get_status():
 def get_inbox():
     """Retorna la lista de correos procesados (los últimos 50)."""
     return jsonify({
-        "emails": youchat_bot.processed_emails[:50], # Devuelve solo los 50 más recientes
+        "emails": youchat_bot.processed_emails[:50], 
         "total_count": youchat_bot.total_processed,
         "message": "Lista de correos procesados."
     })
@@ -250,12 +243,10 @@ def inicializar_bot():
 if IMAP_USER and IMAP_PASSWORD:
     inicializar_bot()
 else:
-    # Esto es altamente improbable ya que se han establecido valores por defecto
-    structured_logger.error("IMAP Bot no se pudo iniciar: Faltan credenciales críticas (incluso con valores por defecto).")
+    structured_logger.error("IMAP Bot no se pudo iniciar: Faltan credenciales críticas.")
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
-    # Aquí se utiliza '0.0.0.0' para que sea accesible externamente
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
 
 # Manejo de apagado del bot
