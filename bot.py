@@ -46,13 +46,10 @@ app = Flask(__name__)
 # =============================================================================
 # CONFIGURACIÓN PARA GMAIL
 # =============================================================================
-EMAIL_ACCOUNT = "smorlando19@nauta.cu"
-EMAIL_PASSWORD = "mO*061119"
-IMAP_SERVER = "imap.nauta.cu"
-IMAP_PORT = 143
-SMTP_SERVER = "smtp.nauta.cu"
-SMTP_PORT = 25
-CHECK_INTERVAL = 3
+IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
+IMAP_PORT = int(os.getenv("IMAP_PORT", 993))
+IMAP_USER = os.getenv("IMAP_USER", "tu_email@gmail.com")
+IMAP_PASSWORD = os.getenv("IMAP_PASSWORD", "TU_CONTRASEÑA_DE_APLICACIÓN")
 
 # =============================================================================
 # Manejador de señales para cerrar conexiones limpiamente
