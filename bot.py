@@ -56,9 +56,8 @@ IMAP_PASSWORD = os.getenv("IMAP_PASSWORD", "wopahppfgakptilr")
 EMAIL_ACCOUNT = os.getenv("EMAIL_ACCOUNT", IMAP_USER)
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", IMAP_PASSWORD)
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-# CAMBIO CLAVE: Usamos el puerto 465 (SMTP_SSL) para mayor estabilidad
-SMTP_PORT = int(os.getenv("SMTP_PORT", 465))
-# Nombre definido para resolver el NameError
+# CAMBIO CRÍTICO FINAL: Usamos el puerto 2525 (SMTP con STARTTLS) como alternativa
+SMTP_PORT = int(os.getenv("SMTP_PORT", 2525)) 
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 10)) # Intervalo de verificación en segundos (e.g., 10 segundos)
 
 # =============================================================================
@@ -147,15 +146,18 @@ class YouChatBot:
             self.imap_connection = None
 
     def check_smtp_health(self):
-        """Verifica la conectividad con el servidor SMTP usando SSL"""
+        """Verifica la conectividad con el servidor SMTP usando STARTTLS en el puerto alternativo 2525"""
         try:
-            # USANDO SMTP_SSL para puerto 465
-            with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=10) as servidor:
+            # USANDO smtplib.SMTP para el puerto 2525 con starttls
+            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as servidor:
+                servidor.ehlo()
+                servidor.starttls()
+                servidor.ehlo()
                 servidor.noop()
-            structured_logger.info("Servidor SMTP accesible (SSL)")
+            structured_logger.info(f"Servidor SMTP accesible (STARTTLS en {SMTP_PORT})")
             return True
         except Exception as e:
-            structured_logger.error("Verificación de salud SMTP falló (SSL)", {"error": str(e)})
+            structured_logger.error(f"Verificación de salud SMTP falló (STARTTLS en {SMTP_PORT})", {"error": str(e)})
             return False
 
     def extraer_headers_youchat(self, mensaje_email):
@@ -262,7 +264,7 @@ class YouChatBot:
             return None
 
     def enviar_respuesta_raw(self, destinatario, msg_id_original=None, youchat_profile_headers=None, asunto_original=None):
-        """Envía respuesta usando formato RAW con reintentos y SMTP_SSL"""
+        """Envía respuesta usando formato RAW con reintentos y STARTTLS en 2525"""
         try:
             structured_logger.info("Iniciando envío de respuesta RAW", {"destinatario": destinatario})
             mensaje_raw = self.construir_mensaje_raw_youchat(
@@ -281,8 +283,11 @@ class YouChatBot:
             for attempt in range(retries):
                 try:
                     structured_logger.info(f"Conectando al servidor SMTP (intento {attempt + 1}/{retries})")
-                    # USANDO smtplib.SMTP_SSL para el puerto 465
-                    with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=30) as servidor:
+                    # USANDO smtplib.SMTP para el puerto 2525 con STARTTLS
+                    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30) as servidor:
+                        servidor.ehlo()
+                        servidor.starttls()
+                        servidor.ehlo()
                         structured_logger.info("Autenticando con Gmail")
                         servidor.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
                         structured_logger.info("Enviando email")
@@ -449,7 +454,7 @@ def home():
             "Reconexión automática",
             "Manejo robusto de errores",
             "Logging estructurado y rotación",
-            "Reintentos SMTP (SSL)",
+            "Reintentos SMTP (STARTTLS en 2525)", # Se actualiza la descripción
             "Headers optimizados"
         ],
         "interval": f"{CHECK_INTERVAL} segundos",
@@ -535,7 +540,7 @@ def inicializar_bot():
             "Reconexión automática",
             "Manejo robusto de errores",
             "Logging estructurado",
-            "Reintentos SMTP (SSL)",
+            "Reintentos SMTP (STARTTLS en 2525)", # Se actualiza la descripción
             "Headers optimizados"
         ]
     })
