@@ -44,15 +44,25 @@ structured_logger = StructuredLogger(logger)
 app = Flask(__name__)
 
 # =============================================================================
-# CONFIGURACIÓN PARA GMAIL
+# CONFIGURACIÓN DE CORREO Y CONSTANTES
 # =============================================================================
+# Configuración IMAP
 IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
 IMAP_PORT = int(os.getenv("IMAP_PORT", 993))
 IMAP_USER = os.getenv("IMAP_USER", "youchatbotpy@gmail.com")
 IMAP_PASSWORD = os.getenv("IMAP_PASSWORD", "wopahppfgakptilr")
 
+# Variables Globales Derivadas y Constantes
+# Las variables usadas en el logging y las rutas de Flask estaban faltando
+EMAIL_ACCOUNT = os.getenv("EMAIL_ACCOUNT", IMAP_USER)
+EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", IMAP_PASSWORD)
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 10)) # Intervalo de verificación en segundos (e.g., 10 segundos)
+
 # =============================================================================
 # Manejador de señales para cerrar conexiones limpiamente
+# ... (el resto del código sigue igual)
 # =============================================================================
 def signal_handler(sig, frame):
     structured_logger.info("Recibida señal de terminación, cerrando conexiones")
@@ -390,6 +400,7 @@ class YouChatBot:
     def run_bot(self):
         """Ejecuta el bot en un bucle continuo"""
         self.is_running = True
+        # LINEA 393 CORREGIDA
         structured_logger.info("Bot YouChat INICIADO - VERSIÓN CON CONEXIÓN ROBUSTA", {"interval": CHECK_INTERVAL, "email_account": EMAIL_ACCOUNT})
         consecutive_errors = 0
         max_consecutive_errors = 5
@@ -430,6 +441,7 @@ bot_thread = None
 # =============================================================================
 @app.route('/')
 def home():
+    # LINEA 445 CORREGIDA
     return jsonify({
         "status": "online",
         "service": "YouChat Bot - Conexión Robusta",
@@ -501,6 +513,7 @@ def stop_bot():
 
 @app.route('/status')
 def status():
+    # LINEA 508 CORREGIDA
     return jsonify({
         "is_running": youchat_bot.is_running,
         "last_check": youchat_bot.last_check.isoformat() if youchat_bot.last_check else None,
